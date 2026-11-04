@@ -1,5 +1,7 @@
 package com.example.booking;
 
+import com.example.booking.cache.AvailabilityCache;
+import com.example.booking.hold.HoldService;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -8,16 +10,22 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 
 @Service
 public class BookingService {
 
     private final BookingRepository bookings;
     private final SlotRepository slots;
+    private final HoldService holds;
+    private final AvailabilityCache availabilityCache;
 
-    public BookingService(BookingRepository bookings, SlotRepository slots) {
+    public BookingService(BookingRepository bookings, SlotRepository slots,
+                          HoldService holds, AvailabilityCache availabilityCache) {
         this.bookings = bookings;
         this.slots = slots;
+        this.holds = holds;
+        this.availabilityCache = availabilityCache;
     }
 
     @Transactional
@@ -27,11 +35,22 @@ public class BookingService {
         if (!slot.getStartTime().isAfter(Instant.now())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Cannot book a slot that has already started");
         }
+
+        Optional<Long> holder = holds.getHolder(slotId);
+        if (holder.isPresent() && !holder.get().equals(userId)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Slot " + slotId + " is currently held by another user");
+        }
+
+        Booking saved;
         try {
-            return bookings.saveAndFlush(new Booking(slotId, userId));
+            saved = bookings.saveAndFlush(new Booking(slotId, userId));
         } catch (DataIntegrityViolationException e) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Slot " + slotId + " is already booked");
         }
+
+        availabilityCache.evictAfterCommit(slot.getResourceId());   // the free-slot list just changed
+        holds.releaseQuietly(slotId, userId);                       // my hold has served its purpose
+        return saved;
     }
 
     @Transactional
@@ -42,6 +61,7 @@ public class BookingService {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You can only cancel your own bookings");
         }
         booking.cancel();   
+        slots.findById(booking.getSlotId()).ifPresent(s -> availabilityCache.evictAfterCommit(s.getResourceId()));
         return booking;
     }
 

@@ -7,6 +7,17 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate   
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 500ms          
+      connect-timeout: 500ms
+  cache:
+    type: redis
+    redis:
+      time-to-live: 60s      
+      cache-null-values: false
 
 server:
   error:
@@ -19,3 +30,8 @@ app:
   admin:                       
     email: admin@example.com
     password: admin12345
+  holds:
+    ttl-seconds: 600         
+  rate-limit:
+    login-per-minute: 10       
+    booking-per-minute: 20    
