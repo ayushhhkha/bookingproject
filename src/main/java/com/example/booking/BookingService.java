@@ -1,6 +1,8 @@
 package com.example.booking;
 
 import com.example.booking.cache.AvailabilityCache;
+import com.example.booking.events.BookingEvent;
+import com.example.booking.events.OutboxService;
 import com.example.booking.hold.HoldService;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -19,13 +21,15 @@ public class BookingService {
     private final SlotRepository slots;
     private final HoldService holds;
     private final AvailabilityCache availabilityCache;
+    private final OutboxService outbox;
 
-    public BookingService(BookingRepository bookings, SlotRepository slots,
-                          HoldService holds, AvailabilityCache availabilityCache) {
+    public BookingService(BookingRepository bookings, SlotRepository slots, HoldService holds,
+                          AvailabilityCache availabilityCache, OutboxService outbox) {
         this.bookings = bookings;
         this.slots = slots;
         this.holds = holds;
         this.availabilityCache = availabilityCache;
+        this.outbox = outbox;
     }
 
     @Transactional
@@ -47,6 +51,7 @@ public class BookingService {
         } catch (DataIntegrityViolationException e) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Slot " + slotId + " is already booked");
         }
+        outbox.record(BookingEvent.CREATED, saved, slot.getResourceId());
 
         availabilityCache.evictAfterCommit(slot.getResourceId());   // the free-slot list just changed
         holds.releaseQuietly(slotId, userId);                       // my hold has served its purpose
@@ -60,8 +65,14 @@ public class BookingService {
         if (!isAdmin && !booking.getUserId().equals(currentUserId)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You can only cancel your own bookings");
         }
-        booking.cancel();   
-        slots.findById(booking.getSlotId()).ifPresent(s -> availabilityCache.evictAfterCommit(s.getResourceId()));
+        if (booking.getStatus() == Booking.Status.CANCELLED) {
+            return booking; 
+        }
+
+        booking.cancel();  
+        Slot slot = slots.findById(booking.getSlotId()).orElseThrow();   
+        availabilityCache.evictAfterCommit(slot.getResourceId());      
+        outbox.record(BookingEvent.CANCELLED, booking, slot.getResourceId());
         return booking;
     }
 

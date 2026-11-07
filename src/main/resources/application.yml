@@ -18,6 +18,22 @@ spring:
     redis:
       time-to-live: 60s      
       cache-null-values: false
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      acks: all                       
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true    
+        max.block.ms: 3000            
+        request.timeout.ms: 3000
+        delivery.timeout.ms: 6000
+    consumer:
+      group-id: notification-service
+      auto-offset-reset: earliest    
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
 
 server:
   error:
@@ -34,4 +50,9 @@ app:
     ttl-seconds: 600         
   rate-limit:
     login-per-minute: 10       
-    booking-per-minute: 20    
+    booking-per-minute: 20     
+  kafka:
+    topic: booking-events      
+  outbox:
+    poll-interval-ms: 1000    
+    batch-size: 100
