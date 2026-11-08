@@ -18,4 +18,5 @@ public interface OutboxRepository extends JpaRepository<OutboxEvent, Long> {
     List<OutboxEvent> lockNextBatch(@Param("limit") int limit);
 
     List<OutboxEvent> findByAggregateIdOrderByIdAsc(Long aggregateId);
+    long countByPublishedAtIsNull();
 }

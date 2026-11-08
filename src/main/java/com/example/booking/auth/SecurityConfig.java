@@ -28,14 +28,16 @@ public class SecurityConfig {
     @Bean
     SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
-            .csrf(csrf -> csrf.disable())   
+            .csrf(csrf -> csrf.disable())   // safe: we use a header token, not cookies (see MASTER.md)
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/api/auth/**").permitAll()                        
-                .requestMatchers("/error").permitAll()                              
-                .requestMatchers(HttpMethod.GET, "/api/resources/**").permitAll()   
+                .requestMatchers("/api/auth/**").permitAll()                        // register + login
+                .requestMatchers("/error").permitAll()                              // so error messages render
+                .requestMatchers(HttpMethod.GET, "/", "/index.html", "/favicon.ico").permitAll()   // the web frontend
+                .requestMatchers("/actuator/health/**", "/actuator/info", "/actuator/prometheus").permitAll()  // ops endpoints (see MASTER.md: block /actuator/prometheus at the proxy in production)
+                .requestMatchers(HttpMethod.GET, "/api/resources/**").permitAll()   // browsing is public
                 .requestMatchers(HttpMethod.POST, "/api/resources/**").hasRole("ADMIN")
-                .anyRequest().authenticated())                                      
+                .anyRequest().authenticated())                                      // everything else: logged in
             .oauth2ResourceServer(oauth -> oauth
                 .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter())));
         return http.build();

@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Booking</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2433; --muted:#667085; --accent:#2f6fed; --danger:#d92d20; --ok:#12b76a; --border:#e4e7ec; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); }
+  header { background:var(--card); border-bottom:1px solid var(--border); padding:12px 20px; display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  header h1 { margin:0; font-size:18px; }
+  main { max-width:980px; margin:20px auto; padding:0 16px; display:grid; gap:16px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  .card h2 { margin:0 0 10px; font-size:16px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:760px) { .grid { grid-template-columns:1fr; } }
+  form { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  input, select { padding:8px 10px; border:1px solid var(--border); border-radius:8px; font:inherit; }
+  button { padding:8px 12px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button.secondary { background:#eef2ff; color:var(--accent); }
+  button.danger { background:var(--danger); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  table { width:100%; border-collapse:collapse; }
+  td, th { text-align:left; padding:8px 6px; border-bottom:1px solid var(--border); vertical-align:middle; }
+  th { color:var(--muted); font-weight:600; font-size:13px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; background:#eef2ff; color:var(--accent); }
+  .tag.held { background:#fff4e5; color:#b54708; }
+  .tag.CANCELLED { background:#fee4e2; color:var(--danger); }
+  .tag.CONFIRMED { background:#d1fadf; color:#067647; }
+  #msg { position:sticky; top:0; z-index:5; padding:10px 14px; border-radius:8px; display:none; }
+  #msg.ok { display:block; background:#d1fadf; color:#067647; }
+  #msg.error { display:block; background:#fee4e2; color:var(--danger); }
+  .hidden { display:none !important; }
+  ul { margin:0; padding-left:18px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Booking</h1>
+  <div id="who" class="muted"></div>
+  <button id="logout" class="secondary hidden">Log out</button>
+</header>
+
+<main>
+  <div id="msg" role="status"></div>
+
+  <section id="auth" class="card">
+    <h2>Log in or register</h2>
+    <form id="auth-form">
+      <input id="email" type="email" placeholder="email" required>
+      <input id="password" type="password" placeholder="password (min 8 chars)" minlength="8" required>
+      <input id="name" placeholder="name (only to register)">
+      <button type="submit">Log in</button>
+      <button type="button" id="register" class="secondary">Register</button>
+    </form>
+    <p class="muted">Browsing works without an account. Booking needs a login.</p>
+  </section>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Resources</h2>
+      <table><tbody id="resources"></tbody></table>
+    </section>
+    <section class="card">
+      <h2 id="slots-title">Free slots</h2>
+      <table><tbody id="slots"><tr><td class="muted">Pick a resource.</td></tr></tbody></table>
+    </section>
+  </div>
+
+  <div class="grid logged-in hidden">
+    <section class="card">
+      <h2>My bookings</h2>
+      <table><tbody id="bookings"></tbody></table>
+    </section>
+    <section class="card">
+      <h2>My notifications <button id="refresh-notes" class="secondary" style="float:right">Refresh</button></h2>
+      <ul id="notes"></ul>
+      <p class="muted">Created asynchronously from Kafka events, so they may appear a second after booking.</p>
+    </section>
+  </div>
+
+  <section id="admin" class="card hidden">
+    <h2>Admin</h2>
+    <form id="resource-form">
+      <input id="resource-name" placeholder="new resource name" required>
+      <button type="submit">Create resource</button>
+    </form>
+    <form id="slot-form" style="margin-top:10px">
+      <select id="slot-resource" required></select>
+      <input id="slot-start" type="datetime-local" required>
+      <input id="slot-minutes" type="number" min="5" value="60" style="width:90px" required>
+      <span class="muted">minutes</span>
+      <button type="submit">Add slot</button>
+    </form>
+  </section>
+</main>
+
+<script>
+  const state = { token: sessionStorage.getItem('token'), user: null, resources: [], resourceId: null };
+  const $ = (id) => document.getElementById(id);
+
+  function el(tag, props = {}, ...children) {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(props)) {
+      if (key === 'class') node.className = value;
+      else if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
+      else node.setAttribute(key, value);
+    }
+    for (const child of children) if (child !== null && child !== undefined) node.append(child);
+    return node;
+  }
+
+  function message(text, isError = false) {
+    const box = $('msg');
+    box.textContent = text;
+    box.className = isError ? 'error' : 'ok';
+    clearTimeout(message.timer);
+    message.timer = setTimeout(() => { box.className = ''; }, 6000);
+  }
+
+  async function api(method, path, body) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (state.token) headers.Authorization = 'Bearer ' + state.token;
+    const res = await fetch('/api' + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* empty body, e.g. 204 */ }
+    if (!res.ok) {
+      if (res.status === 401 && state.token) { logout(); throw new Error('Session expired, please log in again'); }
+      throw new Error((data && (data.message || data.error)) || res.status + ' ' + res.statusText);
+    }
+    return data;
+  }
+
+  const fmt = (iso) => new Date(iso).toLocaleString();
+  const attempt = async (fn) => { try { await fn(); } catch (e) { message(e.message, true); } };
+
+  async function login(email, password) {
+    const t = await api('POST', '/auth/login', { email, password });
+    state.token = t.token;
+    sessionStorage.setItem('token', t.token);
+    await loadSession();
+  }
+
+  async function loadSession() {
+    if (state.token) {
+      try { state.user = await api('GET', '/me'); } catch (e) { message(e.message, true); return; }
+    }
+    updateView();
+    await loadResources();
+    if (state.user) { await Promise.all([loadBookings(), loadNotes()]); }
+  }
+
+  function logout() {
+    state.token = null; state.user = null; state.resourceId = null;
+    sessionStorage.removeItem('token');
+    updateView();
+    loadResources();
+  }
+
+  function updateView() {
+    const loggedIn = !!state.user;
+    $('auth').classList.toggle('hidden', loggedIn);
+    $('logout').classList.toggle('hidden', !loggedIn);
+    document.querySelectorAll('.logged-in').forEach((n) => n.classList.toggle('hidden', !loggedIn));
+    $('admin').classList.toggle('hidden', !(loggedIn && state.user.role === 'ADMIN'));
+    $('who').textContent = loggedIn ? state.user.name + ' (' + state.user.role + ')' : '';
+  }
+
+  async function loadResources() {
+    state.resources = await api('GET', '/resources');
+    const body = $('resources');
+    body.replaceChildren();
+    if (!state.resources.length) body.append(el('tr', {}, el('td', { class: 'muted' }, 'No resources yet.')));
+    for (const r of state.resources) {
+      body.append(el('tr', {},
+        el('td', {}, r.name),
+        el('td', {}, el('button', { class: 'secondary', onclick: () => attempt(() => showSlots(r.id)) }, 'Show free slots'))));
+    }
+    const select = $('slot-resource');
+    select.replaceChildren(...state.resources.map((r) => el('option', { value: r.id }, r.name)));
+  }
+
+  async function showSlots(resourceId) {
+    state.resourceId = resourceId;
+    const resource = state.resources.find((r) => r.id === resourceId);
+    $('slots-title').textContent = 'Free slots: ' + (resource ? resource.name : resourceId);
+    const slots = await api('GET', '/resources/' + resourceId + '/slots/available');
+    const body = $('slots');
+    body.replaceChildren();
+    if (!slots.length) body.append(el('tr', {}, el('td', { class: 'muted' }, 'No free slots.')));
+    for (const s of slots) {
+      const actions = state.user ? el('td', {},
+        el('button', { class: 'secondary', onclick: () => attempt(() => hold(s.id)) }, 'Hold 10 min'), ' ',
+        el('button', { onclick: () => attempt(() => book(s.id)) }, 'Book')) : el('td', { class: 'muted' }, 'log in to book');
+      body.append(el('tr', {},
+        el('td', {}, fmt(s.startTime)),
+        el('td', {}, s.held ? el('span', { class: 'tag held' }, 'held') : ''),
+        actions));
+    }
+  }
+
+  async function hold(slotId) {
+    await api('POST', '/holds', { slotId });
+    message('Slot held for 10 minutes. Others cannot book it meanwhile.');
+    await showSlots(state.resourceId);
+  }
+
+  async function book(slotId) {
+    await api('POST', '/bookings', { slotId });
+    message('Booked! A notification will follow shortly.');
+    await Promise.all([showSlots(state.resourceId), loadBookings()]);
+    setTimeout(() => attempt(loadNotes), 2000);
+  }
+
+  async function loadBookings() {
+    const list = await api('GET', '/bookings/mine');
+    const body = $('bookings');
+    body.replaceChildren();
+    if (!list.length) body.append(el('tr', {}, el('td', { class: 'muted' }, 'No bookings yet.')));
+    for (const b of list) {
+      body.append(el('tr', {},
+        el('td', {}, '#' + b.id + ' (slot ' + b.slotId + ')'),
+        el('td', {}, el('span', { class: 'tag ' + b.status }, b.status)),
+        el('td', {}, b.status === 'CONFIRMED'
+          ? el('button', { class: 'danger', onclick: () => attempt(() => cancel(b.id)) }, 'Cancel') : '')));
+    }
+  }
+
+  async function cancel(id) {
+    await api('POST', '/bookings/' + id + '/cancel');
+    message('Booking cancelled.');
+    await loadBookings();
+    if (state.resourceId) await showSlots(state.resourceId);
+    setTimeout(() => attempt(loadNotes), 2000);
+  }
+
+  async function loadNotes() {
+    const list = await api('GET', '/notifications/mine');
+    const ul = $('notes');
+    ul.replaceChildren();
+    if (!list.length) ul.append(el('li', { class: 'muted' }, 'Nothing yet.'));
+    for (const n of list) ul.append(el('li', {}, n.message, ' ', el('span', { class: 'muted' }, fmt(n.createdAt))));
+  }
+
+  $('auth-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    attempt(() => login($('email').value, $('password').value));
+  });
+  $('register').addEventListener('click', () => attempt(async () => {
+    const name = $('name').value.trim();
+    if (!name) throw new Error('Enter your name to register');
+    await api('POST', '/auth/register', { email: $('email').value, password: $('password').value, name });
+    await login($('email').value, $('password').value);
+    message('Account created. Welcome!');
+  }));
+  $('logout').addEventListener('click', logout);
+  $('refresh-notes').addEventListener('click', () => attempt(loadNotes));
+
+  $('resource-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    attempt(async () => {
+      await api('POST', '/resources', { name: $('resource-name').value });
+      $('resource-name').value = '';
+      message('Resource created.');
+      await loadResources();
+    });
+  });
+  $('slot-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    attempt(async () => {
+      const start = new Date($('slot-start').value);
+      const end = new Date(start.getTime() + Number($('slot-minutes').value) * 60000);
+      const id = Number($('slot-resource').value);
+      await api('POST', '/resources/' + id + '/slots', { startTime: start.toISOString(), endTime: end.toISOString() });
+      message('Slot added.');
+      await showSlots(id);
+    });
+  });
+
+  attempt(loadSession);
+</script>
+</body>
+</html>

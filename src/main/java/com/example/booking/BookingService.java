@@ -4,6 +4,7 @@ import com.example.booking.cache.AvailabilityCache;
 import com.example.booking.events.BookingEvent;
 import com.example.booking.events.OutboxService;
 import com.example.booking.hold.HoldService;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -22,14 +23,16 @@ public class BookingService {
     private final HoldService holds;
     private final AvailabilityCache availabilityCache;
     private final OutboxService outbox;
+    private final MeterRegistry meters;
 
     public BookingService(BookingRepository bookings, SlotRepository slots, HoldService holds,
-                          AvailabilityCache availabilityCache, OutboxService outbox) {
+                          AvailabilityCache availabilityCache, OutboxService outbox, MeterRegistry meters) {
         this.bookings = bookings;
         this.slots = slots;
         this.holds = holds;
         this.availabilityCache = availabilityCache;
         this.outbox = outbox;
+        this.meters = meters;
     }
 
     @Transactional
@@ -42,6 +45,7 @@ public class BookingService {
 
         Optional<Long> holder = holds.getHolder(slotId);
         if (holder.isPresent() && !holder.get().equals(userId)) {
+            meters.counter("bookings.conflicts", "reason", "held").increment();
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Slot " + slotId + " is currently held by another user");
         }
 
@@ -49,12 +53,15 @@ public class BookingService {
         try {
             saved = bookings.saveAndFlush(new Booking(slotId, userId));
         } catch (DataIntegrityViolationException e) {
+            meters.counter("bookings.conflicts", "reason", "already_booked").increment();
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Slot " + slotId + " is already booked");
         }
+
         outbox.record(BookingEvent.CREATED, saved, slot.getResourceId());
 
-        availabilityCache.evictAfterCommit(slot.getResourceId());   // the free-slot list just changed
-        holds.releaseQuietly(slotId, userId);                       // my hold has served its purpose
+        meters.counter("bookings.created").increment();
+        availabilityCache.evictAfterCommit(slot.getResourceId());   
+        holds.releaseQuietly(slotId, userId);                      
         return saved;
     }
 
@@ -66,13 +73,14 @@ public class BookingService {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You can only cancel your own bookings");
         }
         if (booking.getStatus() == Booking.Status.CANCELLED) {
-            return booking; 
+            return booking;   
         }
 
         booking.cancel();  
         Slot slot = slots.findById(booking.getSlotId()).orElseThrow();   
-        availabilityCache.evictAfterCommit(slot.getResourceId());      
+        availabilityCache.evictAfterCommit(slot.getResourceId());       
         outbox.record(BookingEvent.CANCELLED, booking, slot.getResourceId());
+        meters.counter("bookings.cancelled").increment();
         return booking;
     }
 
